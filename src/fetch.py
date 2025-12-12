@@ -44,7 +44,7 @@ class NetworkUtils:
         request = requests.Request('GET', full_url, params=params, headers=headers)
         prepared = request.prepare()
 
-        print(f"[INFO] Fetching {request.url}")
+        print(f"[INFO] Fetching {prepared.url}")
 
         session = requests.Session()
         response = session.send(prepared)
