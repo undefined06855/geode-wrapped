@@ -38,6 +38,12 @@ class Utils:
             "Authorization": f"Bearer {os.environ["GITHUB_API_TOKEN"]}"
         }
 
+    @staticmethod
+    def geode_auth_headers():
+        return {
+            "Authorization": f"Bearer {os.environ["GEODE_API_TOKEN"]}"
+        }
+
 class NetworkUtils:
     @staticmethod
     def raw(full_url: str, params: dict[str, Any] = {}, headers: dict[str, str] = {}):
@@ -54,12 +60,16 @@ class NetworkUtils:
 
         json = response.json()
 
+        if str(type(json)) == "<class 'list'>":
+            json = { "__data": json }
+
         link_header = response.headers.get("Link")
         if link_header:
             for part in link_header.split(", "):
                 url, rel = part.split(";")
-                if rel == "rel=\"next\"":
+                if rel.strip() == "rel=\"next\"":
                     json["__internal_github_next_url"] = url.strip()[1:-1]
+                    break
 
         return json
 
@@ -67,7 +77,7 @@ class NetworkUtils:
     def geode(endpoint: str, data: dict[str, Any] = {}):
         url_base = os.environ["GEODE_API_ENDPOINT"]
 
-        json_data = NetworkUtils.raw(f"{url_base}{endpoint}", params=data)
+        json_data = NetworkUtils.raw(f"{url_base}{endpoint}", params=data, headers=Utils.geode_auth_headers())
 
         if "error" in json_data and len(json_data["error"]) != 0:
             raise NetworkError(f"Error when fetching {endpoint} from Geode: {json_data["error"]}")
@@ -91,7 +101,6 @@ class NetworkUtils:
 
         return json_data["data"]
 
-
     @staticmethod
     def github(endpoint: str, data: dict[str, Any] = {}):
         url_base = os.environ["GITHUB_API_ENDPOINT"]
@@ -106,7 +115,7 @@ class NetworkUtils:
         return json_data
 
     @staticmethod
-    def github_paginated(endpoint: str, required_data: str | None, data: dict[str, Any]={}):
+    def github_paginated(endpoint: str, required_data: str, data: dict[str, Any]={}):
         data["page"] = 1
         data["per_page"] = 100
         json_data = NetworkUtils.github(endpoint, data)
@@ -116,12 +125,14 @@ class NetworkUtils:
             while json_data["__internal_github_next_url"]:
                 data["page"] += 1
                 next_url = json_data["__internal_github_next_url"]
-                if required_data:
-                    json_data[required_data].extend(NetworkUtils.github(next_url)[required_data])
+                next_data = NetworkUtils.github(next_url)
+                json_data[required_data].extend(next_data[required_data])
+                if "__internal_github_next_url" in next_data:
+                    json_data["__internal_github_next_url"] = next_data["__internal_github_next_url"]
                 else:
-                    json_data.extend(NetworkUtils.github(next_url))
+                    json_data["__internal_github_next_url"] = None
 
-        return json_data[required_data] if required_data else json_data
+        return json_data[required_data]
 
 class DeveloperGeodeModVersion:
     def __init__(self, json_data):
@@ -148,7 +159,7 @@ class DeveloperGithubRepository:
         self.failed_action_runs = len([ run for run in actions_data if run["conclusion"] == "failure" ])
 
         self.commits = []
-        commit_data = NetworkUtils.github_paginated(f"/repos/{full_name}/commits", None)
+        commit_data = NetworkUtils.github_paginated(f"/repos/{full_name}/commits", "__data")
         with ThreadPoolExecutor(max_workers=20) as executor:
             futures = [ executor.submit(DeveloperGithubCommit, data) for data in commit_data ]
             for future in as_completed(futures):
@@ -157,7 +168,8 @@ class DeveloperGithubRepository:
 
 class DeveloperGeodeMod:
     def __init__(self, json_data):
-        self.versions: list[DeveloperGeodeModVersion] = [DeveloperGeodeModVersion(data) for data in NetworkUtils.geode_paginated(f"/mods/{json_data["id"]}/versions")]
+        # NOTE: /versions does NOT work authenticated
+        self.versions: list[DeveloperGeodeModVersion] = [DeveloperGeodeModVersion(data) for data in NetworkUtils.geode(f"/mods/{json_data["id"]}")["versions"]]
         self.downloads: int = json_data["download_count"]
         self.featured: bool = json_data["featured"]
         self.developer_count = len(json_data["developers"])
@@ -165,6 +177,8 @@ class DeveloperGeodeMod:
         latest_version_info = NetworkUtils.geode(f"/mods/{json_data["id"]}/versions/latest")
         self.dependency_count = len(latest_version_info["dependencies"])
         self.creation_date = latest_version_info["created_at"]
+
+        # TODO: get github link from release url
 
         if os.environ["FETCH_GITHUB_REPO_DATA"] != "true":
             return
@@ -238,7 +252,12 @@ class Snapshot:
         data: str = jsonpickle.encode(self, unpicklable=False) # pyright: ignore[reportAssignmentType]
         print(data)
 
-        with open("data.json", "w") as file:
+        try:
+            os.makedirs("../data")
+        except FileExistsError:
+            pass
+
+        with open("../data/data.json", "w") as file:
             file.write(data)
 
 if __name__ == "__main__":
