@@ -5,12 +5,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from humanfriendly import format_timespan
 from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
+from tqdm import tqdm
 import jsonpickle
+import logging
+import argparse
 import os
 import requests
 import re
 import time
 import sys
+
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
 
 class GeodeVersionState(str, Enum):
     pending = "pending"
@@ -26,10 +32,6 @@ class NetworkRateLimitedError(Exception):
 
 class Network404Error(Exception):
     pass
-
-original_print = print
-def print(string: Any):
-    original_print(string)
 
 REPO_INFO_GRAPHQL = """
 query ($owner: String!, $name: String!, $cursor: String) {
@@ -67,19 +69,6 @@ query ($owner: String!, $name: String!, $cursor: String) {
 
 class Utils:
     @staticmethod
-    def parse_github_url(url: str) -> tuple[str, str] | None:
-        if "github.com" not in url:
-            return None
-
-        match = re.search(r"github\.com[:/](?P<user>[^/]+)/(?P<repo>[^/]+)(?:\.git)?", url)
-        if not match:
-            return None
-
-        username = match.group('user')
-        repo = match.group('repo').replace('.git', '')
-        return username, repo
-
-    @staticmethod
     def github_auth_headers():
         return {
             "Authorization": f"Bearer {os.environ["GITHUB_API_TOKEN"]}"
@@ -103,7 +92,7 @@ class NetworkUtils:
         )
         prepared = request.prepare()
 
-        print(f"[INFO] Fetching {prepared.url}")
+        logger.debug(f"Fetching {prepared.url}")
 
         session = requests.Session()
         response = session.send(prepared)
@@ -131,12 +120,12 @@ class NetworkUtils:
                     break
 
         if "data" in json and "rateLimit" in json["data"]:
-                print(f"[INFO] GitHub GraphQL remaining: {json["data"]["rateLimit"]["remaining"]} (resets in {format_timespan(datetime.fromisoformat(json["data"]["rateLimit"]["resetAt"]).timestamp() - time.time())})")
+                logger.debug(f"GitHub GraphQL remaining: {json["data"]["rateLimit"]["remaining"]} (resets in {format_timespan(datetime.fromisoformat(json["data"]["rateLimit"]["resetAt"]).timestamp() - time.time())})")
         else:
             rate_limit_remaining = response.headers.get("X-Ratelimit-Remaining")
             rate_limit_reset = response.headers.get("X-Ratelimit-Reset")
             if rate_limit_remaining and rate_limit_reset:
-                print(f"[INFO] GitHub REST remaining: {rate_limit_remaining} (resets in {format_timespan(int(rate_limit_reset) - time.time())})")
+                logger.debug(f"GitHub REST remaining: {rate_limit_remaining} (resets in {format_timespan(int(rate_limit_reset) - time.time())})")
 
 
         return json
@@ -213,17 +202,10 @@ class DeveloperGithubRepository:
         full_name = json_data["full_name"]
         name, repo = full_name.split("/")
         actions_data = NetworkUtils.github_paginated(f"/repos/{full_name}/actions/runs", "workflow_runs")
-        latest_commit_sha = NetworkUtils.github(f"/repos/{full_name}/branches/{json_data["default_branch"]}")["commit"]["sha"]
-        repo_tree = NetworkUtils.github(f"/repos/{full_name}/git/trees/{latest_commit_sha}", { "recursive": 1 })
-
-        if repo_tree["truncated"]:
-            # what the fuck
-            # not even globed gets truncated
-            print(f"[WARN] Repo {full_name} is too large and so the file count will be incorrect! Manually traversing file trees may be implemented in the future.")
-
-        self.file_count = len([ file for file in repo_tree["tree"] if file["type"] == "blob"])
         self.total_action_runs = len([ run for run in actions_data if run["status"] == "completed" ])
         self.failed_action_runs = len([ run for run in actions_data if run["conclusion"] == "failure" ])
+
+        latest_commit_sha = None
 
         self.commits: list[DeveloperGithubCommit] = []
 
@@ -244,6 +226,19 @@ class DeveloperGithubRepository:
                 raise NetworkError(f"GraphQL Error!\n{jsonpickle.dumps(data["errors"], indent=4)}")
 
             repositoryInfo = data["data"]["repository"]
+
+            # we are fetching commit sha through graphql instead of another rest api request#
+            # so if we dont have it yet, get it and use it to get the repo tree
+            if not latest_commit_sha:
+                latest_commit_sha = repositoryInfo["defaultBranchRef"]["target"]["oid"]
+                repo_tree = NetworkUtils.github(f"/repos/{full_name}/git/trees/{latest_commit_sha}", { "recursive": 1 })
+
+                if repo_tree["truncated"]:
+                    # what the fuck
+                    # not even globed gets truncated
+                    logger.warning(f"Repo {full_name} is too large and so the file count will be incorrect! Manually traversing file trees may be implemented in the future.")
+
+                self.file_count = len([ file for file in repo_tree["tree"] if file["type"] == "blob"])
 
             history = repositoryInfo["defaultBranchRef"]["target"]["history"]
 
@@ -274,35 +269,37 @@ class DeveloperGeodeMod:
         self.dependency_count = len(latest_version_info["dependencies"])
         self.creation_date = latest_version_info["created_at"]
 
-        # TODO: get github link from release url
-
         if os.environ["FETCH_GITHUB_REPO_DATA"] != "true":
             return
 
-        if json_data["links"] == None:
+        # regex taken from https://github.com/geode-sdk/website/blob/6b9d67/src/routes/mods/%5Bid%5D/%2Bpage.svelte#L351
+        # and slightly modified
+
+        regex = r"^(?:https?:\/\/)?github\.com\/([\w-]+\/[\w-]+)(?:\/|$)"
+
+        source_link: str | None = None
+
+        if "direct_download_link" in latest_version_info or "github" not in latest_version_info["direct_download_link"]:
+            # for fancy pants index staff
+            source_link = latest_version_info["direct_download_link"]
+        elif json_data["links"] != None:
+            source_link = json_data["links"]["source"]
+
+        if not source_link:
             self.github_repo = None
             return
 
-        source_link = json_data["links"]["source"]
+        regex_match = re.match(regex, source_link)
 
-        if source_link == None:
-            self.github_repo = None
+        if not regex_match:
             return
 
-        if "github" not in source_link:
-            self.github_repo = None
-            return
-
-        parsed = Utils.parse_github_url(source_link)
-        if not parsed:
-            return
-
-        username, repo_name = parsed
+        pair = regex_match.group(1)
 
         try:
-            self.github_repo = DeveloperGithubRepository(NetworkUtils.github(f"/repos/{username}/{repo_name}"))
+            self.github_repo = DeveloperGithubRepository(NetworkUtils.github(f"/repos/{pair}"))
         except Network404Error:
-            print(f"[WARN] Repository linked ({username}/{repo_name}) does not exist!")
+            logger.warning(f"Repository linked ({pair}) does not exist!")
 
 class DeveloperGithubInfo:
     def __init__(self, json_data):
@@ -325,17 +322,19 @@ class Developer:
             github_data = NetworkUtils.github(f"/user/{self.github_id}")
             self.github_data = DeveloperGithubInfo(github_data)
         except Network404Error:
-            print(f"[WARN] GitHub account associated with {self.username} does not exist!")
+            logger.warning(f"GitHub account associated with {self.username} does not exist!")
 
 class Snapshot:
     def __init__(self):
         limit = int(os.environ["DEVELOPER_LIMIT"]) if "DEVELOPER_LIMIT" in os.environ else -1
 
+        logger.info("Fetching developers...")
         self.developers = []
         developer_data = NetworkUtils.geode_paginated("/developers", limit=limit)
+
         with ThreadPoolExecutor(max_workers=int(os.environ["MAX_WORKER_THREADS"])) as executor:
             futures = [ executor.submit(Developer, data) for data in developer_data ]
-            for future in as_completed(futures):
+            for future in tqdm(as_completed(futures), total=len(developer_data), desc="Developers"):
                 self.developers.append(future.result())
 
     def save_to_json(self, is_monthly = False):
@@ -361,20 +360,39 @@ def one_cycle(is_monthly = False):
 
     end = time.perf_counter()
 
-    print(f"[INFO] Gathering data took {format_timespan(end - start)}!")
+    logger.info(f"Gathering data took {format_timespan(end - start)}!")
 
     if is_monthly:
-        print("[INFO] This was a monthly data gathering! Come back in a month...")
+        logger.info("This was a monthly data gathering! Come back in a month...")
 
 if __name__ == "__main__":
     load_dotenv()
 
-    if len(sys.argv) <= 1:
-        one_cycle()
-    elif sys.argv[1] == "--monthly":
-        print("[INFO] Scheduling monthly...")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--monthly", help="Fetch Geode Wrapped data at the start of every month, automatically.", action="store_true")
+    parser.add_argument("--debug-log", help="Enables debug logs.", action="store_true")
+
+    arguments = parser.parse_args()
+
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.INFO)
+    if arguments.debug_log:
+        stdout_handler.setLevel(logging.DEBUG)
+
+    file_handler = logging.FileHandler("debug.log", mode="w")
+    file_handler.setLevel(logging.DEBUG)
+
+    logger.addHandler(stdout_handler)
+    logger.addHandler(file_handler)
+
+    if arguments.monthly:
+        logger.info("Scheduling monthly...")
         scheduler = BlockingScheduler()
-        scheduler.add_job(lambda: one_cycle(True), "cron", day=15, hour=0, minute=0)
+        scheduler.add_job(lambda: one_cycle(True), "cron", day=1, hour=0, minute=0)
         scheduler.start()
     else:
-        print("[WARN] Unknown command line arguments!")
+        one_cycle()

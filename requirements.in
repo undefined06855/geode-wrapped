@@ -3,3 +3,4 @@ requests
 jsonpickle
 humanfriendly
 apscheduler
+tqdm
