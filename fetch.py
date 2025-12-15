@@ -21,6 +21,11 @@ class GeodeVersionState(str, Enum):
 class NetworkError(Exception):
     pass
 
+class NetworkRateLimitedError(Exception):
+    pass
+
+class Network404Error(Exception):
+    pass
 
 original_print = print
 def print(string: Any):
@@ -103,8 +108,14 @@ class NetworkUtils:
         session = requests.Session()
         response = session.send(prepared)
 
-        if response.status_code != 200:
-            raise NetworkError(f"{request.url} response code was not 200!")
+        if response.status_code == 404:
+            raise Network404Error(f"{request.url} returned 404 response code!")
+
+        if response.status_code == 403 or response.status_code == 429:
+            raise NetworkRateLimitedError(f"{"GitHub" if response.status_code == 403 else "Geode"} API has been rate-limited!")
+
+        # if response.status_code != 200:
+        #     raise NetworkError(f"{request.url} response code was not 200!")
 
         json = response.json()
 
@@ -118,6 +129,15 @@ class NetworkUtils:
                 if rel.strip() == "rel=\"next\"":
                     json["__internal_github_next_url"] = url.strip()[1:-1]
                     break
+
+        if "data" in json and "rateLimit" in json["data"]:
+                print(f"[INFO] GitHub GraphQL remaining: {json["data"]["rateLimit"]["remaining"]} (resets in {format_timespan(datetime.fromisoformat(json["data"]["rateLimit"]["resetAt"]).timestamp() - time.time())})")
+        else:
+            rate_limit_remaining = response.headers.get("X-Ratelimit-Remaining")
+            rate_limit_reset = response.headers.get("X-Ratelimit-Reset")
+            if rate_limit_remaining and rate_limit_reset:
+                print(f"[INFO] GitHub REST remaining: {rate_limit_remaining} (resets in {format_timespan(int(rate_limit_reset) - time.time())})")
+
 
         return json
 
@@ -223,13 +243,7 @@ class DeveloperGithubRepository:
             if "errors" in data:
                 raise NetworkError(f"GraphQL Error!\n{jsonpickle.dumps(data["errors"], indent=4)}")
 
-            rateLimitInfo = data["data"]["rateLimit"]
             repositoryInfo = data["data"]["repository"]
-
-            print(f"[INFO] GraphQL remaining: {rateLimitInfo["remaining"]}")
-
-            if rateLimitInfo["remaining"] < 20:
-                print(f"[WARN] GraphQL remaining count very low! ({rateLimitInfo["remaining"]}) (resets in {datetime.fromisoformat(rateLimitInfo["resetAt"]).timestamp() - time.time()})")
 
             history = repositoryInfo["defaultBranchRef"]["target"]["history"]
 
@@ -285,7 +299,10 @@ class DeveloperGeodeMod:
 
         username, repo_name = parsed
 
-        self.github_repo = DeveloperGithubRepository(NetworkUtils.github(f"/repos/{username}/{repo_name}"))
+        try:
+            self.github_repo = DeveloperGithubRepository(NetworkUtils.github(f"/repos/{username}/{repo_name}"))
+        except Network404Error:
+            print(f"[WARN] Repository linked ({username}/{repo_name}) does not exist!")
 
 class DeveloperGithubInfo:
     def __init__(self, json_data):
@@ -307,7 +324,7 @@ class Developer:
         try:
             github_data = NetworkUtils.github(f"/user/{self.github_id}")
             self.github_data = DeveloperGithubInfo(github_data)
-        except NetworkError:
+        except Network404Error:
             print(f"[WARN] GitHub account associated with {self.username} does not exist!")
 
 class Snapshot:
@@ -357,7 +374,7 @@ if __name__ == "__main__":
     elif sys.argv[1] == "--monthly":
         print("[INFO] Scheduling monthly...")
         scheduler = BlockingScheduler()
-        scheduler.add_job(lambda: one_cycle(True), "cron", day=1, hour=0, minute=0)
+        scheduler.add_job(lambda: one_cycle(True), "cron", day=15, hour=0, minute=0)
         scheduler.start()
     else:
         print("[WARN] Unknown command line arguments!")
