@@ -20,6 +20,7 @@
     ```
     (or just set the environment variables)
 1. Run `fetch.py` to fetch the data one time, or `fetch.py --monthly` to start a timer to fetch the data at the start of every month. (for more argument examples see `--help`)
+1. Once the year is over, run `analyse.py` to analyse the information, and `serve.py` to start a web server!
 
 ## Contributing
 
