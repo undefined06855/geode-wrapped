@@ -2,7 +2,7 @@
 
 ## Setup
 
-1. Become index staff to get accurate mod versions and GitHub repository links (or alternatively convince everyone on the index to add you as a co-owner of their mod)
+1. Become index staff to get accurate mod versions and GitHub repository links
 1. Create a venv (`python3 -m venv ./venv && source ./venv/bin/activate # or platform-specific alternative`) and run `pip install -r requirements.txt`
 1. Create a .env file based on the following:
 ```
@@ -16,3 +16,21 @@ MAX_WORKER_THREADS=20
 ```
 (or just set the environment variables)
 1. Run `fetch.py` to fetch the data one time, or `fetch.py --monthly` to start a timer to fetch the data at the start of every month. (for more argument examples see `--help`)
+
+## Contributing
+
+Install development packages by running `pip install -r requirements_dev.txt`
+
+Before committing, make sure to run
+```
+black . -t py314 -l 120
+isort .
+```
+
+And if you want to add more packages, make sure to run
+```
+pip-compile --strip-extras
+# or
+pip-compile requirements_dev.in --strip-extras
+```
+(ideally using python 3.14 but whatever I don't really care if it's newer)

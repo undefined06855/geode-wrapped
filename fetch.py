@@ -1,22 +1,24 @@
-from enum import Enum
-from dotenv import load_dotenv
-from typing import Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from humanfriendly import format_timespan
-from datetime import datetime
-from apscheduler.schedulers.blocking import BlockingScheduler
-from tqdm import tqdm
-import jsonpickle
-import logging
 import argparse
+import logging
 import os
-import requests
 import re
-import time
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+import jsonpickle
+import requests
+from apscheduler.schedulers.blocking import BlockingScheduler
+from dotenv import load_dotenv
+from humanfriendly import format_timespan
+from tqdm import tqdm
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
+
 
 class GeodeVersionState(str, Enum):
     pending = "pending"
@@ -24,14 +26,18 @@ class GeodeVersionState(str, Enum):
     unlisted = "unlisted"
     verified = "verified"
 
+
 class NetworkError(Exception):
     pass
+
 
 class NetworkRateLimitedError(Exception):
     pass
 
+
 class Network404Error(Exception):
     pass
+
 
 REPO_INFO_GRAPHQL = """
 query ($owner: String!, $name: String!, $cursor: String) {
@@ -67,28 +73,31 @@ query ($owner: String!, $name: String!, $cursor: String) {
 }
 """
 
+
 class Utils:
     @staticmethod
     def github_auth_headers():
-        return {
-            "Authorization": f"Bearer {os.environ["GITHUB_API_TOKEN"]}"
-        }
+        return {"Authorization": f"Bearer {os.environ["GITHUB_API_TOKEN"]}"}
 
     @staticmethod
     def geode_auth_headers():
-        return {
-            "Authorization": f"Bearer {os.environ["GEODE_API_TOKEN"]}"
-        }
+        return {"Authorization": f"Bearer {os.environ["GEODE_API_TOKEN"]}"}
+
 
 class NetworkUtils:
     @staticmethod
-    def raw(full_url: str, params_or_json: dict[str, Any] = {}, headers: dict[str, str] = {}, method="GET"):
+    def raw(
+        full_url: str,
+        params_or_json: dict[str, Any] = {},
+        headers: dict[str, str] = {},
+        method="GET",
+    ):
         request = requests.Request(
             method,
             full_url,
             params=params_or_json if method == "GET" else None,
             json=params_or_json if method == "POST" else None,
-            headers=headers
+            headers=headers,
         )
         prepared = request.prepare()
 
@@ -101,7 +110,9 @@ class NetworkUtils:
             raise Network404Error(f"{request.url} returned 404 response code!")
 
         if response.status_code == 403 or response.status_code == 429:
-            raise NetworkRateLimitedError(f"{"GitHub" if response.status_code == 403 else "Geode"} API has been rate-limited!")
+            raise NetworkRateLimitedError(
+                f"{"GitHub" if response.status_code == 403 else "Geode"} API has been rate-limited!"
+            )
 
         # if response.status_code != 200:
         #     raise NetworkError(f"{request.url} response code was not 200!")
@@ -109,24 +120,27 @@ class NetworkUtils:
         json = response.json()
 
         if str(type(json)) == "<class 'list'>":
-            json = { "__data": json }
+            json = {"__data": json}
 
         link_header = response.headers.get("Link")
         if link_header:
             for part in link_header.split(", "):
                 url, rel = part.split(";")
-                if rel.strip() == "rel=\"next\"":
+                if rel.strip() == 'rel="next"':
                     json["__internal_github_next_url"] = url.strip()[1:-1]
                     break
 
         if "data" in json and "rateLimit" in json["data"]:
-                logger.debug(f"GitHub GraphQL remaining: {json["data"]["rateLimit"]["remaining"]} (resets in {format_timespan(datetime.fromisoformat(json["data"]["rateLimit"]["resetAt"]).timestamp() - time.time())})")
+            logger.debug(
+                f"GitHub GraphQL remaining: {json["data"]["rateLimit"]["remaining"]} (resets in {format_timespan(datetime.fromisoformat(json["data"]["rateLimit"]["resetAt"]).timestamp() - time.time())})"
+            )
         else:
             rate_limit_remaining = response.headers.get("X-Ratelimit-Remaining")
             rate_limit_reset = response.headers.get("X-Ratelimit-Reset")
             if rate_limit_remaining and rate_limit_reset:
-                logger.debug(f"GitHub REST remaining: {rate_limit_remaining} (resets in {format_timespan(int(rate_limit_reset) - time.time())})")
-
+                logger.debug(
+                    f"GitHub REST remaining: {rate_limit_remaining} (resets in {format_timespan(int(rate_limit_reset) - time.time())})"
+                )
 
         return json
 
@@ -134,7 +148,11 @@ class NetworkUtils:
     def geode(endpoint: str, data: dict[str, Any] = {}):
         url_base = os.environ["GEODE_API_ENDPOINT"]
 
-        json_data = NetworkUtils.raw(f"{url_base}{endpoint}", params_or_json=data, headers=Utils.geode_auth_headers())
+        json_data = NetworkUtils.raw(
+            f"{url_base}{endpoint}",
+            params_or_json=data,
+            headers=Utils.geode_auth_headers(),
+        )
 
         if "error" in json_data and len(json_data["error"]) != 0:
             raise NetworkError(f"Error when fetching {endpoint} from Geode: {json_data["error"]}")
@@ -167,12 +185,14 @@ class NetworkUtils:
         json_data = NetworkUtils.raw(full_url, params_or_json=data, headers=Utils.github_auth_headers())
 
         if "message" in json_data:
-            raise NetworkError(f"Error when fetching {endpoint} from GitHub: {json_data["message"]} (see {json_data["documentation_url"]})")
+            raise NetworkError(
+                f"Error when fetching {endpoint} from GitHub: {json_data["message"]} (see {json_data["documentation_url"]})"
+            )
 
         return json_data
 
     @staticmethod
-    def github_paginated(endpoint: str, required_data: str, data: dict[str, Any]={}):
+    def github_paginated(endpoint: str, required_data: str, data: dict[str, Any] = {}):
         data["page"] = 1
         data["per_page"] = 100
         json_data = NetworkUtils.github(endpoint, data)
@@ -185,11 +205,12 @@ class NetworkUtils:
                 next_data = NetworkUtils.github(next_url)
                 json_data[required_data].extend(next_data[required_data])
                 if "__internal_github_next_url" in next_data:
-                   json_data["__internal_github_next_url"] = next_data["__internal_github_next_url"]
+                    json_data["__internal_github_next_url"] = next_data["__internal_github_next_url"]
                 else:
                     json_data["__internal_github_next_url"] = None
 
         return json_data[required_data]
+
 
 class DeveloperGithubCommit:
     def __init__(self, json_data):
@@ -197,13 +218,14 @@ class DeveloperGithubCommit:
         self.additions: int = json_data["additions"]
         self.deletions: int = json_data["deletions"]
 
+
 class DeveloperGithubRepository:
     def __init__(self, json_data):
         full_name = json_data["full_name"]
         name, repo = full_name.split("/")
         actions_data = NetworkUtils.github_paginated(f"/repos/{full_name}/actions/runs", "workflow_runs")
-        self.total_action_runs = len([ run for run in actions_data if run["status"] == "completed" ])
-        self.failed_action_runs = len([ run for run in actions_data if run["conclusion"] == "failure" ])
+        self.total_action_runs = len([run for run in actions_data if run["status"] == "completed"])
+        self.failed_action_runs = len([run for run in actions_data if run["conclusion"] == "failure"])
 
         latest_commit_sha = None
 
@@ -213,14 +235,15 @@ class DeveloperGithubRepository:
         while True:
             json = {
                 "query": REPO_INFO_GRAPHQL,
-                "variables": {
-                    "owner": name,
-                    "name": repo,
-                    "cursor": cursor
-                }
+                "variables": {"owner": name, "name": repo, "cursor": cursor},
             }
 
-            data = NetworkUtils.raw(f"{os.environ["GITHUB_API_ENDPOINT"]}/graphql", json, Utils.github_auth_headers(), "POST")
+            data = NetworkUtils.raw(
+                f"{os.environ["GITHUB_API_ENDPOINT"]}/graphql",
+                json,
+                Utils.github_auth_headers(),
+                "POST",
+            )
 
             if "errors" in data:
                 raise NetworkError(f"GraphQL Error!\n{jsonpickle.dumps(data["errors"], indent=4)}")
@@ -231,14 +254,19 @@ class DeveloperGithubRepository:
             # so if we dont have it yet, get it and use it to get the repo tree
             if not latest_commit_sha:
                 latest_commit_sha = repositoryInfo["defaultBranchRef"]["target"]["oid"]
-                repo_tree = NetworkUtils.github(f"/repos/{full_name}/git/trees/{latest_commit_sha}", { "recursive": 1 })
+                repo_tree = NetworkUtils.github(
+                    f"/repos/{full_name}/git/trees/{latest_commit_sha}",
+                    {"recursive": 1},
+                )
 
                 if repo_tree["truncated"]:
                     # what the fuck
                     # not even globed gets truncated
-                    logger.warning(f"Repo {full_name} is too large and so the file count will be incorrect! Manually traversing file trees may be implemented in the future.")
+                    logger.warning(
+                        f"Repo {full_name} is too large and so the file count will be incorrect! Manually traversing file trees may be implemented in the future."
+                    )
 
-                self.file_count = len([ file for file in repo_tree["tree"] if file["type"] == "blob"])
+                self.file_count = len([file for file in repo_tree["tree"] if file["type"] == "blob"])
 
             history = repositoryInfo["defaultBranchRef"]["target"]["history"]
 
@@ -250,6 +278,7 @@ class DeveloperGithubRepository:
 
             cursor = history["pageInfo"]["endCursor"]
 
+
 class DeveloperGeodeModVersion:
     def __init__(self, json_data):
         self.downloads: int = json_data["download_count"]
@@ -257,10 +286,13 @@ class DeveloperGeodeModVersion:
         self.name: str = json_data["name"]
         self.date: str = json_data["updated_at"]
 
+
 class DeveloperGeodeMod:
     def __init__(self, json_data):
         # NOTE: /versions does NOT work authenticated
-        self.versions = [ DeveloperGeodeModVersion(data) for data in NetworkUtils.geode(f"/mods/{json_data["id"]}")["versions"] ]
+        self.versions = [
+            DeveloperGeodeModVersion(data) for data in NetworkUtils.geode(f"/mods/{json_data["id"]}")["versions"]
+        ]
         self.downloads: int = json_data["download_count"]
         self.featured: bool = json_data["featured"]
         self.developer_count = len(json_data["developers"])
@@ -301,9 +333,11 @@ class DeveloperGeodeMod:
         except Network404Error:
             logger.warning(f"Repository linked ({pair}) does not exist!")
 
+
 class DeveloperGithubInfo:
     def __init__(self, json_data):
         self.follower_count: int = json_data["followers"]
+
 
 class Developer:
     def __init__(self, json_data):
@@ -316,13 +350,16 @@ class Developer:
 
         self.github_id: int = json_data["github_id"]
 
-        self.mods = [ DeveloperGeodeMod(data) for data in NetworkUtils.geode_paginated("/mods", { "developer": self.username }) ]
+        self.mods = [
+            DeveloperGeodeMod(data) for data in NetworkUtils.geode_paginated("/mods", {"developer": self.username})
+        ]
 
         try:
             github_data = NetworkUtils.github(f"/user/{self.github_id}")
             self.github_data = DeveloperGithubInfo(github_data)
         except Network404Error:
             logger.warning(f"GitHub account associated with {self.username} does not exist!")
+
 
 class Snapshot:
     def __init__(self):
@@ -333,12 +370,12 @@ class Snapshot:
         developer_data = NetworkUtils.geode_paginated("/developers", limit=limit)
 
         with ThreadPoolExecutor(max_workers=int(os.environ["MAX_WORKER_THREADS"])) as executor:
-            futures = [ executor.submit(Developer, data) for data in developer_data ]
+            futures = [executor.submit(Developer, data) for data in developer_data]
             for future in tqdm(as_completed(futures), total=len(developer_data), desc="Developers"):
                 self.developers.append(future.result())
 
-    def save_to_json(self, is_monthly = False):
-        data: str = jsonpickle.encode(self, unpicklable=False) # pyright: ignore[reportAssignmentType]
+    def save_to_json(self, is_monthly=False):
+        data: str = jsonpickle.encode(self, unpicklable=False)  # pyright: ignore[reportAssignmentType]
 
         try:
             os.makedirs("data/")
@@ -352,7 +389,8 @@ class Snapshot:
         with open(filename, "w") as file:
             file.write(data)
 
-def one_cycle(is_monthly = False):
+
+def one_cycle(is_monthly=False):
     start = time.perf_counter()
 
     snapshot = Snapshot()
@@ -365,11 +403,16 @@ def one_cycle(is_monthly = False):
     if is_monthly:
         logger.info("This was a monthly data gathering! Come back in a month...")
 
+
 if __name__ == "__main__":
     load_dotenv()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--monthly", help="Fetch Geode Wrapped data at the start of every month, automatically.", action="store_true")
+    parser.add_argument(
+        "--monthly",
+        help="Fetch Geode Wrapped data at the start of every month, automatically.",
+        action="store_true",
+    )
     parser.add_argument("--debug-log", help="Enables debug logs.", action="store_true")
 
     arguments = parser.parse_args()
