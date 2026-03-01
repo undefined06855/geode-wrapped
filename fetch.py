@@ -16,9 +16,8 @@ from dotenv import load_dotenv
 from humanfriendly import format_timespan
 from tqdm import tqdm
 
+# not sure why our debug logs from other modules only work when using root logger? not good practice but
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-
 
 class GeodeVersionState(str, Enum):
     pending = "pending"
@@ -354,6 +353,10 @@ class Developer:
             DeveloperGeodeMod(data) for data in NetworkUtils.geode_paginated("/mods", {"developer": self.username})
         ]
 
+        if len(self.mods) == 0:
+            self.github_data = {}
+            return
+
         try:
             github_data = NetworkUtils.github(f"/user/{self.github_id}")
             self.github_data = DeveloperGithubInfo(github_data)
@@ -417,14 +420,16 @@ if __name__ == "__main__":
 
     arguments = parser.parse_args()
 
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("apscheduler").setLevel(logging.WARNING)
-
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.INFO)
-    if arguments.debug_log:
-        stdout_handler.setLevel(logging.DEBUG)
+
+    log_level = logging.DEBUG if arguments.debug_log else logging.INFO
+
+    stdout_handler.setLevel(log_level)
+    logging.getLogger("geode-wrapped").setLevel(log_level)
+    logging.getLogger("urllib3").setLevel(log_level)
+    logging.getLogger("requests").setLevel(log_level)
+    logging.getLogger("apscheduler").setLevel(log_level)
+    logging.getLogger("tzlocal").setLevel(log_level)
 
     file_handler = logging.FileHandler("debug.log", mode="w")
     file_handler.setLevel(logging.DEBUG)
@@ -435,7 +440,7 @@ if __name__ == "__main__":
     if arguments.monthly:
         logger.info("Scheduling monthly...")
         scheduler = BlockingScheduler()
-        scheduler.add_job(lambda: one_cycle(True), "cron", day=1, hour=0, minute=0)
+        scheduler.add_job(lambda: one_cycle(True), "cron", day=4, hour=0, minute=0)
         scheduler.start()
     else:
         one_cycle()
