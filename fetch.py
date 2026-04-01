@@ -19,6 +19,7 @@ from tqdm import tqdm
 # not sure why our debug logs from other modules only work when using root logger? not good practice but
 logger = logging.getLogger()
 
+
 class GeodeVersionState(str, Enum):
     pending = "pending"
     rejected = "rejected"
@@ -366,10 +367,13 @@ class Developer:
                 logger.warning(f"GitHub account associated with {self.username} does not exist!")
                 return False
 
-        for _ in range(5):
+        for _ in range(15):
             try:
                 if not try_fetch_gh_data():
                     continue
+
+                logger.info("failed to fetch github data, trying again after 3s")
+                time.sleep(3)
             except:
                 pass
 
