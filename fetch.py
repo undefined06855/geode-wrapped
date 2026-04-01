@@ -357,11 +357,21 @@ class Developer:
             self.github_data = {}
             return
 
-        try:
-            github_data = NetworkUtils.github(f"/user/{self.github_id}")
-            self.github_data = DeveloperGithubInfo(github_data)
-        except Network404Error:
-            logger.warning(f"GitHub account associated with {self.username} does not exist!")
+        def try_fetch_gh_data() -> bool:
+            try:
+                github_data = NetworkUtils.github(f"/user/{self.github_id}")
+                self.github_data = DeveloperGithubInfo(github_data)
+                return True
+            except Network404Error:
+                logger.warning(f"GitHub account associated with {self.username} does not exist!")
+                return False
+
+        for _ in range(5):
+            try:
+                if not try_fetch_gh_data():
+                    continue
+            except:
+                pass
 
 
 class Snapshot:
