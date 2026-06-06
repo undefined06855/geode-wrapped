@@ -304,6 +304,11 @@ class DeveloperGeodeMod:
         if os.environ["FETCH_GITHUB_REPO_DATA"] != "true":
             return
 
+        # remove github data because rate limits are too harsh
+        # in the final dataset june and later do not have github statistics
+        self.github_data = {}
+        return
+
         # regex taken from https://github.com/geode-sdk/website/blob/6b9d67/src/routes/mods/%5Bid%5D/%2Bpage.svelte#L351
         # and slightly modified
 
@@ -353,6 +358,11 @@ class Developer:
         self.mods = [
             DeveloperGeodeMod(data) for data in NetworkUtils.geode_paginated("/mods", {"developer": self.username})
         ]
+
+        # remove github data because rate limits are too harsh
+        # in the final dataset june and later do not have github statistics
+        self.github_data = {}
+        return
 
         if len(self.mods) == 0:
             self.github_data = {}
